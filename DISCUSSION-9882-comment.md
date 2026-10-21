@@ -1,54 +1,53 @@
-# Discussion #9882 回帖草稿（发布时贴到上游帖子，替换 <REPO> 占位符）
+# Discussion #9882 回帖草稿（发布时替换 <REPO> 占位符）
 
 ---
 
-**TL;DR (EN):** We hit the same zombie-session bug on 0.2.1-rc.2/Windows and instrumented it:
-**509 occurrences across 95/157 session logs**; one event on 10-19 killed 57 sessions at once.
-Beyond @tianguoyan's boot theorem and @little3tar's runtime-reconstruction variant, we found a
-**third throw site nobody has published a fix for**: with global auto-review enabled,
-`config.defaultPreset === "auto"` makes the constructor fail at the fail-fast validation
-(`this.resolve(defaultPreset)`, lib/index.js :181 / `defaultSettings` closure :184) — *before*
-reaching the `pinInitialPermission` throw. So a pin-site-only guard (including wrapping or
-@argszero's restore-guard, which targets the session/created variant) is **not sufficient** when
-the global auto toggle is on: `specOf("auto")` returns `undefined` during construction because
-`autoAdmit` is only registered later by the auto-review consumer.
-We published a working byte-level mitigation covering all three sites (P1′ pin-site fail-closed
-demotion + P1″ defaultSettings fallback + dsh-ops #154 backport), with backup / SHA-stamp /
-rollback / unattended flow: **<REPO>**. It is a mitigation, not a root fix — the unconditional
-full-graph reconcile on any profile write (`config_editor.js:75`) and the dead-fiber
-`isChanged`-always-true loop (`:93-96`) remain; a proper fix belongs in the host (equality gate
-before `entry.update()`, or not depending on late-registered facts during construction).
+**EN summary:** Same bug on my machine (0.2.1-rc.2, Windows). Session logs say it's worse than
+"switching models freezes things": *any* profile write triggers it — 509 occurrences across
+95/157 sessions in my logs, one event killed 57 sessions at once.
+
+While patching it I found one throw site that I don't think has been mentioned here yet: if the
+global auto-review toggle is on, `defaultPreset` becomes `"auto"` and the constructor fails at
+its very first validation (lib/index.js :181/:184), *before* it ever reaches
+`pinInitialPermission`. `autoAdmit` is only registered by the auto-review plugin after
+construction, so guarding just the pin site won't save a machine with global auto enabled.
+
+I put the byte-level patch I run on my machine here: **<REPO>** (covers both sites, with backup
+and rollback). It's a workaround, not a fix — the real problem is that the host rebuilds the
+whole plugin graph on every config write, with no equality gate before `entry.update()`. That
+part is up to the maintainers.
+
+Big thanks to @tianguoyan, @argszero and @little3tar — the map in this thread was right, I
+just filled in one blank spot.
 
 ---
 
-**中文详情：**
+**中文：**
 
-本机 0.2.1-rc.2/Windows 复现并全量取证：会话日志里 `cannot get required service
-"sessionProjections" in inactive context` 共 **509 次、波及 95/157 个会话**；10-19 一次事件
-同时打挂 57 个会话。触发面是**任何 profile 写盘**（切模型/effort、切权限预设、插件热编辑、
-dsh-ops 配置更新），不是切模型专属。
+我这台 0.2.1-rc.2/Windows 也中了同一个 bug。翻了全部会话日志之后发现问题比"切模型卡死"更宽：
+**任何** profile 写盘都会触发（切模型、切权限、热改插件、dsh-ops 更新配置都算）。我的日志里
+同一个错误出现了 509 次，波及 95/157 个会话，10-19 有一次一口气打挂 57 个会话。
 
-补充一个帖子里没出现过的病灶（对"全局自动审查开着"的用户是决定性的）：
+打补丁的过程中发现一个本帖还没提到的炸点：如果全局自动审查是开着的，`defaultPreset` 就是
+`"auto"`，构造器会在最开头的校验（:181/:184）直接抛——**走不到** `pinInitialPermission` 那个
+大家关注的 throw。因为 `autoAdmit` 是 auto-review 在构造之后才注册的。所以只保护 pin 点的
+方案，救不了开着全局自动审查的机器。
 
-- `defaultPreset` 是 `z.string().volatile()` 配置。GUI 打开全局自动审查后，活进程内
-  `config.defaultPreset === "auto"`；
-- 此时运行时重建 permission-presets，构造器在 **:181 `this.resolve(defaultPreset)`** 和
-  **:184 `defaultSettings` 闭包的 `unknown default preset` 校验**就抛了——**先于**
-  `pinInitialPermission` 里那个大家盯着的 throw（`specOf` 在 `autoAdmit === void 0` 的构造期
-  对 `"auto"` 返回 `undefined`，而 `autoAdmit` 只能由 auto-review 消费者在构造之后注册）；
-- 推论：**只修 pin 点不够**（任何只包住 :374 throw 的方案，对开着全局自动审查的机器仍然必炸）。
+我自己机器上跑的字节级补丁放在这：**<REPO>**。两处抛点都盖住了，带备份和回滚，装完重启生效。
+说清楚：这是止血，不是根治。真正的病根是宿主每次写配置都无条件重建整个插件图
+（`config_editor.js:75`，而且死 fiber 上的 `isChanged` 恒判"变了"，每次写都升级成全图协调）。
+`entry.update()` 前面加个等值门应该就能解决大半，这个得官方来改。
 
-我们的处理（<REPO>，等长字节补丁，备份/版本戳/回滚/无人值守脚本齐全）：
+各方案的分工大概是：
 
-| 补丁 | 位置 | 效果 |
-|---|---|---|
-| P1′ | `pinInitialPermission` auto 分支 | `autoAdmit` 未注册时 fail-closed 降级到默认可解析预设（复用现成 `apply()` 路径，写可见事件），不再拖死整个 fiber |
-| P1″ | :181/:184 构造期校验 | 删 fail-fast，`defaultSettings` 改 `specOf(d) ?? 第一个配置预设`——校验后移到使用时点 |
-| P3 | dsh-ops session-pwsh | #154 的 rc.2 回移（拆一个真实全图触发源） |
+| | 解决什么 |
+|---|---|
+| @argszero 的 restore-guard | 会话行消失那个变体 |
+| dsh-ops #154 | dsh-ops 自己引发的重建 |
+| 我的补丁 | 重建时 auto 会话卡死 + 上面那个更早的炸点 |
 
-代价与边界（如实）：auto 会话遇重建会被持久降级（需手动重选 auto）；钉死 rc.2 字节，升级失效
-需重跑；**是止血不是根治**——`config_editor.js:75` 的无条件全图协调和 `:93-96` 死 fiber 恒判
-"变了"的自放大回路还在，请官方优先在这两处加等值门/存活校验。
+互相不冲突。局限也写在我仓库 README 里了：版本钉死 rc.2、auto 会话遇重建会被降级、
+构造期降级的阳性事件我还没抓到过一次（触发面比较挑时机）。
 
-感谢 @tianguoyan 的启动形态定理、@argszero 的死锁确认与 restore-guard、@little3tar 的运行时
-重建形态分析——本仓库是在三位的地图上补了第三个 throw 点并把 pin 点方案落到可运行的字节补丁。
+感谢 @tianguoyan 的启动形态定理、@argszero 的死锁确认、@little3tar 的重建形态分析，
+这个帖子的地图基本是全的，我就是补了一格。
