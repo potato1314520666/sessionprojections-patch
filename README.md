@@ -54,10 +54,12 @@ turn/end 仍显示 completed（僵尸），只有重启宿主才恢复。
 
 1. 金丝雀新建会话被钉为 `auto`（而非预期的 workspace-write）→ 证明用户开全局自动审查后
    **`config.defaultPreset === "auto"`**。
-2. 读码实锤：构造期 `this.resolve(defaultPreset)`（:181）与 `defaultSettings` 闭包（:184）
-   对无集成的 auto 直接抛 `unknown preset "auto"`（`specOf` 在 `autoAdmit===void 0` 时对 auto 返回
-   `void 0`）——**先于 P1′ 的补丁行爆炸**。即：在 defaultPreset=auto 的机器上（正是本机现状），
-   v3.1 补丁形同虚设，重启（#9882 boot 形态）必炸。
+2. 读码实锤：`defaultPreset: z.string().volatile()`——全局开关只活在进程内。**运行时重建**
+   （切模型）时构造期 `this.resolve(defaultPreset)`（:181）与 `defaultSettings` 闭包（:184）对
+   无集成的 auto 直接抛 `unknown preset "auto"`（`specOf` 在 `autoAdmit===void 0` 时对 auto 返回
+   `void 0`）——**先于 P1′ 的补丁行爆炸**。即：开着全局自动审查切模型，v3.1 形同虚设，必炸
+   （正是用户原始复现路径）。boot 形态则因 volatile 复位到可解析的 inferredDefault + 会话懒加载
+   （23:06 重启实测：构造期 `sessions.list()` 为空，无降级事件）而不在必炸范围。
 3. 附带观测性缺陷：v3.1 的降级目标=defaultPreset=auto 时，写回事件值仍是 auto，日志上与不降级
    不可分辨——「没看到降级」不能证明「重建没发生」。
 
@@ -68,6 +70,16 @@ turn/end 仍显示 completed（僵尸），只有重启宿主才恢复。
 残余缺口（v3.3 候选）：重建窗口内恰好新建会话时，`pinInitialPermission` 的 fresh 分支
 `resolve(defaultPreset)`（:331 调用点）仍可能抛——窗口极窄（构造期不接新会话，仅 session/created
 监听路径），留观察。
+
+## 终验状态（2026-10-21 23:06 重启后取证）
+
+- ✅ v3.2 三处补丁（P1′/P1″/P3）全部落盘（auto-patch.log exit 0，`--check` 三处标记命中，
+  patchedSha=2d3af1bd…），宿主干净启动，工具可用，重启后全机僵尸错误 = 0。
+- ⚠️ **补丁行的阳性活捕仍未完成**：会话懒加载导致 boot 构造期 `sessions.list()` 为空，
+  P1″/P1′ 的构造期分支未被执行（不是失败，是没打靶）。
+- 决定性一发 = 开着全局自动审查**切一次模型**（GUI）：重建时 auto 会话在列 →
+  预期日志出现 `permission/preset {"preset":"workspace-write"}` 降级事件且工具存活 = P1″+P1′ 活捕。
+  未活捕前，本补丁的证据强度 = 代码级定理 + 干净启动 + 金丝雀全绿，如实声明。
 
 ## 应用（必须完全退出 DSH，含托盘图标）
 
