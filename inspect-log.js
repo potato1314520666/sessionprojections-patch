@@ -40,11 +40,25 @@ function decode(file) {
 
 function targets() {
   if (argv.length) return argv.map((t) => fs.statSync(t).isDirectory() ? path.join(t, 'session.v4.jsonl.zstd') : t);
-  return fs.readdirSync(SESS_ROOT)
-    .map((d) => ({ d, t: fs.statSync(path.join(SESS_ROOT, d)).mtimeMs }))
-    .sort((a, b) => b.t - a.t).slice(0, 3)
-    .map(({ d }) => path.join(SESS_ROOT, d, 'session.v4.jsonl.zstd'))
-    .filter((f) => fs.existsSync(f));
+  // default root missing (ran from a different cwd) → fall back to all slugs under ~/.dsh/sessions
+  const roots = [SESS_ROOT];
+  const parent = path.dirname(SESS_ROOT);
+  if (!fs.existsSync(SESS_ROOT) && fs.existsSync(parent)) {
+    for (const s of fs.readdirSync(parent)) {
+      const p = path.join(parent, s);
+      try { if (fs.statSync(p).isDirectory()) roots.push(p); } catch { /* ignore */ }
+    }
+  }
+  const found = [];
+  for (const r of roots) {
+    let entries = [];
+    try { entries = fs.readdirSync(r); } catch { continue; }
+    for (const d of entries) {
+      const f = path.join(r, d, 'session.v4.jsonl.zstd');
+      try { if (fs.existsSync(f)) found.push({ f, t: fs.statSync(f).mtimeMs }); } catch { /* ignore */ }
+    }
+  }
+  return found.sort((a, b) => b.t - a.t).slice(0, 3).map((x) => x.f);
 }
 
 for (const t of targets()) {
