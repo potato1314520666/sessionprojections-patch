@@ -19,17 +19,47 @@
  *
  * 用法：完全退出 DSH（含托盘）后  node patch-dsh.js
  *       只读预览（可在 DSH 运行中）node patch-dsh.js --check
+ * 路径：默认按平台推导；--asar <path> / --profile <dir> / DSH_ASAR / DSH_PROFILE_DIR 可覆盖。
  * 回滚：node rollback-dsh.js
+ *
+ * v3.2 变更（全自动压测发现，代码级实锤）：
+ *  - 新增 P1″（同文件 :181-186）：用户开启全局自动审查后 config.defaultPreset==="auto"，
+ *    构造期 this.resolve(defaultPreset) 与 defaultSettings 闭包会先于 P1′ 抛
+ *    "unknown preset auto"（specOf 对无集成的 auto 返回 void 0）——v3.1 在该状态下形同虚设，
+ *    重启（#9882 boot 形态）必炸。P1″ 把「构造期 fail-fast 校验」改为「使用时回退到
+ *    可解析预设（specOf(d) ?? 配置表第一个）」，P1′ 的 set(session, defaultPreset) 由此恒可解析。
+ *  - 压测取证教训：defaultPreset=auto 时「降级」写回的事件值仍是 auto，日志不可分辨；
+ *    v3.2 后降级目标=第一个配置预设（默认 workspace-write），重新可观测。
  */
 'use strict';
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const ASAR = 'C:/Users/38761/AppData/Local/Programs/DeepSeek Harness/resources/app.asar';
+// ---------- 路径解析（无硬编码个人路径；优先级 CLI > 环境变量 > 平台默认） ----------
+function argVal(flag) { const i = process.argv.indexOf(flag); return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null; }
+function resolveAsar() {
+  const cli = argVal('--asar') || process.env.DSH_ASAR;
+  if (cli) return cli;
+  const home = os.homedir();
+  if (process.platform === 'win32')
+    return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Programs', 'DeepSeek Harness', 'resources', 'app.asar');
+  if (process.platform === 'darwin')
+    return '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar';
+  return path.join(home, '.local', 'share', 'DeepSeek Harness', 'resources', 'app.asar'); // Linux 默认，装了别处就 --asar
+}
+function resolveDshOps() {
+  const prof = argVal('--profile') || process.env.DSH_PROFILE_DIR
+    || path.join(os.homedir(), '.dsh', 'profiles', process.platform === 'win32' ? 'desktop' : 'default');
+  return path.join(prof, 'node_modules', 'dsh-ops', 'lib', 'session-pwsh.js');
+}
+
+const ASAR = resolveAsar();
 const ASAR_BAK = ASAR + '.pre-patch.bak';
 const STAMP = ASAR_BAK + '.json';
-const DSHOPS = 'C:/Users/38761/.dsh/profiles/desktop/node_modules/dsh-ops/lib/session-pwsh.js';
+const DSHOPS = resolveDshOps();
 const DSHOPS_BAK = DSHOPS + '.pre-patch.bak';
 const CHECK_ONLY = process.argv.includes('--check');
 // v3.1：由 auto-patch.ps1 传入——外层脚本已用进程内 FileShare.None 探针验证句柄空闲，
@@ -49,18 +79,26 @@ function sha256(file) {
 
 // ---------- 0. 写入模式：进程 + 文件句柄双重防护 ----------
 if (!CHECK_ONLY) {
-  let out = '';
-  try { out = execSync('tasklist /FI "IMAGENAME eq DeepSeek Harness.exe" /NH', { encoding: 'utf8' }); }
-  catch (e) { die('无法检查进程表: ' + e.message); }
-  if (/DeepSeek Harness\.exe/i.test(out)) die('DSH 仍在运行。请完全退出（含系统托盘）后重试。');
-  ok('DSH 进程未运行');
+  if (process.platform === 'win32') {
+    let out = '';
+    try { out = execSync('tasklist /FI "IMAGENAME eq DeepSeek Harness.exe" /NH', { encoding: 'utf8' }); }
+    catch (e) { die('无法检查进程表: ' + e.message); }
+    if (/DeepSeek Harness\.exe/i.test(out)) die('DSH 仍在运行。请完全退出（含系统托盘）后重试。');
+    ok('DSH 进程未运行');
+  } else {
+    try { if (execSync("pgrep -f 'DeepSeek Harness' || true", { encoding: 'utf8' }).trim()) die('DSH 仍在运行，请完全退出后重试。'); }
+    catch (e) { die('无法检查进程表: ' + e.message); }
+    ok('DSH 进程未运行');
+  }
   if (SKIP_LOCK) {
     ok('句柄探针由外层 auto-patch.ps1 预先完成（--skip-lock-check）');
-  } else {
+  } else if (process.platform === 'win32') {
     try {
       execSync('powershell -NoProfile -Command "[IO.File]::Open(\'' + ASAR + "',Open','Read','None').Close()\"", { stdio: 'pipe', windowsHide: true });
       ok('app.asar 无进程句柄占用（FileShare.None 探针通过）');
     } catch (e) { die('app.asar 仍被某进程持有（FileShare.None 探针失败）。找到并退出该进程后重试。'); }
+  } else {
+    ok('非 Windows：跳过 FileShare 探针（POSIX 允许打开被占用文件，靠上面的进程检查把关）');
   }
 }
 
@@ -95,6 +133,13 @@ const P1_FILE = 'dsh/node_modules/@deepseek-ai/dsh-permission-presets/lib/index.
 // v3 fail-closed：throw+autoAdmit 两行 → autoAdmit 缺失时走现成 set() 降级分支（落盘默认预设+收紧旋钮）
 const P1_FIND = 'if (this.autoAdmit === void 0) throw new Error("permission: cannot restore preset \\"auto\\" without its active integration");\n\t\t\t\tthis.autoAdmit();';
 const P1_REPL = 'if (this.autoAdmit === void 0) this.set(session, this.defaultPreset); else this.autoAdmit();';
+// v3.2 P1″：压测发现——用户把全局默认预设开成 auto 后（defaultPreset.get()==="auto"），
+// 构造期 :181 this.resolve(defaultPreset) 与 :184 defaultSettings 闭包会先于 P1′ 抛出
+// "unknown preset auto"（specOf 在 autoAdmit===void 0 时对 auto 返回 void 0）→ v3.1 形同虚设，
+// 重启必炸（#9882 boot 形态）。修法：删构造期 fail-fast 校验，defaultSettings 改为
+// 「使用时解析不了就退到配置表第一个预设」——校验后移到唯一有用果的地方。
+const P1B_FIND = '\t\t\tthis.resolve(defaultPreset);\n\t\t\tthis.defaultSettings = () => {\n\t\t\t\tconst defaultPreset = config.defaultPreset.get() ?? inferredDefault;\n\t\t\t\tif (!Object.hasOwn(this.presets, defaultPreset)) throw new Error(`permission: unknown default preset "${defaultPreset}"`);\n\t\t\t\treturn { defaultPreset };\n\t\t\t};';
+const P1B_REPL = '\t\t\tthis.defaultSettings = () => {\n\t\t\t\tconst d = config.defaultPreset.get() ?? inferredDefault;\n\t\t\t\treturn { defaultPreset: this.specOf(d) ?? Object.keys(this.presets)[0] };\n\t\t\t};';
 
 function patchAsarFile(label, path, findStr, replStr) {
   const f = files.get(path);
@@ -135,7 +180,7 @@ if (CHECK_ONLY) {
   else if (fs.existsSync(ASAR_BAK)) ok('注意：备份存在但 sha 与版本戳/当前都不匹配（可能已升级）');
   else ok('尚无备份');
 } else if (stamp && stamp.patchedSha === curSha) {
-  ok('当前 asar 已是本补丁产物（版本戳匹配），跳过备份与 asar 写入');
+  ok('当前 asar 已是本补丁产物（版本戳匹配），跳过重新备份（补丁位仍会逐处检查）');
 } else if (stamp && stamp.backupSha === curSha && fs.existsSync(ASAR_BAK)) {
   ok('备份在位且与当前原版逐字节一致，直接补丁');
 } else {
@@ -151,10 +196,11 @@ if (CHECK_ONLY) {
   ok('备份完成，sha256=' + curSha.slice(0, 16) + '…');
 }
 
-// ---------- 4. 执行 asar 补丁（v3 仅 P1） ----------
+// ---------- 4. 执行 asar 补丁（v3.2：P1′ + P1″） ----------
 const r1 = patchAsarFile('P1', P1_FILE, P1_FIND, P1_REPL);
+const r1b = patchAsarFile('P1b', P1_FILE, P1B_FIND, P1B_REPL);
 fs.closeSync(fd);
-if (!CHECK_ONLY && r1 === 'patched') {
+if (!CHECK_ONLY && (r1 === 'patched' || r1b === 'patched')) {
   const patchedSha = sha256(ASAR);
   fs.writeFileSync(STAMP, JSON.stringify({ backupSha: curSha, patchedSha, backupSize: fs.statSync(ASAR_BAK).size, ts: new Date().toISOString(), tool: 'patch-dsh.js v3' }, null, 2));
   ok(`版本戳已写入（patchedSha=${patchedSha.slice(0, 16)}…）`);

@@ -43,15 +43,36 @@ turn/end 仍显示 completed（僵尸），只有重启宿主才恢复。
 
 ## P1′ 的代价（如实声明）
 
-每次 permission-presets 重建时，处于 auto 的会话被**持久降级**为默认预设
-（旋钮同步收紧，需手动重选 auto）。这是用"可见降级"换"进程级僵尸"。
+每次 permission-presets 重建时，处于 auto 的会话被**持久降级**为默认可解析预设
+（v3.2 起：defaultPreset 可解析则用之，否则退配置表第一个；旋钮同步收紧，需手动重选 auto）。这是用"可见降级"换"进程级僵尸"。
 `autoAdmit` 正常注册时（绝大多数时刻）行为与原逻辑逐字节一致。
 降级会写 `permission/preset` 事件——UI 和日志里看得见，不是静默行为。
+
+## v3.2：全自动压测抓出的死补丁（重要，发布前发现）
+
+压测方法：金丝雀子代理会话轮 + 全机 `permission/preset` 事件扫描（inspect-log.js）。发现链：
+
+1. 金丝雀新建会话被钉为 `auto`（而非预期的 workspace-write）→ 证明用户开全局自动审查后
+   **`config.defaultPreset === "auto"`**。
+2. 读码实锤：构造期 `this.resolve(defaultPreset)`（:181）与 `defaultSettings` 闭包（:184）
+   对无集成的 auto 直接抛 `unknown preset "auto"`（`specOf` 在 `autoAdmit===void 0` 时对 auto 返回
+   `void 0`）——**先于 P1′ 的补丁行爆炸**。即：在 defaultPreset=auto 的机器上（正是本机现状），
+   v3.1 补丁形同虚设，重启（#9882 boot 形态）必炸。
+3. 附带观测性缺陷：v3.1 的降级目标=defaultPreset=auto 时，写回事件值仍是 auto，日志上与不降级
+   不可分辨——「没看到降级」不能证明「重建没发生」。
+
+**P1″ 修法**（同文件 :181-186，301B 等长）：删构造期 fail-fast 校验；`defaultSettings` 改为
+`{ defaultPreset: this.specOf(d) ?? Object.keys(this.presets)[0] }`——校验后移到唯一有用果的
+使用时点。P1′ 的 `set(session, this.defaultPreset)` 由此恒可解析，降级重新可观测（目标=第一个配置预设）。
+
+残余缺口（v3.3 候选）：重建窗口内恰好新建会话时，`pinInitialPermission` 的 fresh 分支
+`resolve(defaultPreset)`（:331 调用点）仍可能抛——窗口极窄（构造期不接新会话，仅 session/created
+监听路径），留观察。
 
 ## 应用（必须完全退出 DSH，含托盘图标）
 
 ```powershell
-cd "C:\Users\38761\Documents\deepseek-harness\default-workspace\sessionprojections-patch"
+cd <本仓库目录>
 node patch-dsh.js
 ```
 
@@ -93,6 +114,31 @@ node rollback-dsh.js
 **0.2.1-rc.2** 的字节偏移做过唯一性校验；换版本时目标串找不到会自动拒写（不会盲改）。
 他人使用前先改常量并跑 `--check`。
 
+## 上游对应与同类工作（2026-10-21 调研）
+
+同一缺陷在上游已有**三份独立报告、零发布修复**（0.2.1-rc.2 的 asar 里 throw 仍在，本机字节级确认）：
+
+- [deepseek-harness Discussion #9882](https://github.com/deepseek-ai/deepseek-harness/discussions/9882)（tianguoyan，10-16）——**启动恢复形态**的完整定理证明 + 修复建议（defer / degrade / non-fatal）。本补丁 P1′ 即其 "Degrade" 形态的字节级实施。
+- 同帖 argszero 评论：确认「只有一个解的死锁」、给出 master 行号（`permission-presets/src/index.ts:428-436/:248-250/:307-316`）；发布了 [@argszero/cordis-plugin-permission-restore-guard](https://www.npmjs.com/package/@argszero/cordis-plugin-permission-restore-guard)——只覆盖 **session/created 变体**（会话行消失打不开），**不覆盖构造期变体**（本补丁的目标）。
+- 同帖 little3tar 评论：**运行时重建形态**（任何事件重建 permission-presets fiber 而加载会话钉 auto → 必炸），点名 dsh-ops 的 `entry.fiber.update` 是最常见触发源。
+- [T-Auto/dsh-ops #29 / #104 / #129](https://github.com/T-Auto/dsh-ops/issues/29)（全部 closed-completed）——症状报告三部曲；修复 [#154](https://github.com/T-Auto/dsh-ops/issues/154) 只掐掉 dsh-ops 自己这个触发源（本补丁 P3 即 #154 的 0.2.6 回移），**宿主侧「任何写盘→全图协调→构造定理」未动**。
+- 相邻但不同因：[qmy777/cordis-host-runner-inspect-upsert](https://github.com/qmy777/cordis-host-runner-inspect-upsert)（provider 重名注册拒绝 → 模式挂载弹回），症状族相似、病灶不同。
+
+**本仓库的独立价值**：宿主侧构造期路径的免重启字节级止血（P1′），带备份/版本戳/回滚/无人值守全流程。上游根治（reconcile 等值门 / 构造期不依赖后注册事实）仍待官方。
+
+## 用法（v3.1：无硬编码路径）
+
+```bash
+node patch-dsh.js --check            # 只读预览（DSH 运行中可跑）
+node patch-dsh.js                    # 打补丁（须完全退出 DSH）
+node patch-dsh.js --asar <path>      # 非默认安装位置
+node patch-dsh.js --profile <dir>    # 非默认 profile（默认 ~/.dsh/profiles/desktop|default）
+# 环境变量同效：DSH_ASAR / DSH_PROFILE_DIR / DSH_INSTALL_DIR / DSH_PATCH_DIR / DSH_NODE
+node rollback-dsh.js                 # 带回滚（三重 sha 校验）
+```
+
+进程/句柄防护现为跨平台（win 用 tasklist+FileShare 探针；类 Unix 用 pgrep 并跳过探针）。
+
 ## 已知缺口（v3.1 候选，均已核实当前不可等长实施）
 
 - **P1b** 钩子 try/catch→cancel 守卫：需 192B，现场等长预算只有 150B。
@@ -107,8 +153,3 @@ node rollback-dsh.js
 - **DSH 升级/重装**：app.asar 被覆盖 → P1′ 消失。重跑脚本即可（版本戳会检测 sha 不匹配，
   旧备份改名 `.stale-<时间戳>` 保留）。若上游已修，`--check` 找不到目标串会自动拒写。
 - **dsh-ops 升级到含 #154 的版本**：P3 目标串不存在，脚本自动跳过。
-
-## 上游对应
-
-宿主侧根治（reconcile 等值门 / 死 fiber 不吞 rejection）仍在社区跟踪：#29 / #9812 / #10007。
-本补丁是 0.2.1-rc.2 上的本地止血，不是上游替代品。

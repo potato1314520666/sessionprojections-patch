@@ -1,16 +1,19 @@
-﻿# auto-patch.ps1 v2 — 全自动打补丁。v1 教训：spawn 式探针弹黑窗被用户回车杀死→误判占用。
+﻿# auto-patch.ps1 v3 — 全自动打补丁。v1 教训：spawn 式探针弹黑窗被用户回车杀死→误判占用。
 # v2：外层进程内探针验证句柄 + node 侧 --skip-lock-check 不再弹窗；taskkill 按映像名杀，不靠 Get-Process。
+# v3：去硬编码——路径按「环境变量 > 脚本所在目录/平台默认」解析。注册计划任务前无需手改本文件。
 $ErrorActionPreference = 'Continue'
-$dir      = 'C:\Users\38761\Documents\deepseek-harness\default-workspace\sessionprojections-patch'
-$log      = Join-Path $dir 'auto-patch.log'
-$asar     = 'C:\Users\38761\AppData\Local\Programs\DeepSeek Harness\resources\app.asar'
-$exe      = 'C:\Users\38761\AppData\Local\Programs\DeepSeek Harness\DeepSeek Harness.exe'
-$node     = 'C:\Program Files\nodejs\node.exe'
+$dir  = if ($env:DSH_PATCH_DIR) { $env:DSH_PATCH_DIR } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$log  = Join-Path $dir 'auto-patch.log'
+$dshRoot = if ($env:DSH_INSTALL_DIR) { $env:DSH_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness' }
+$asar = if ($env:DSH_ASAR) { $env:DSH_ASAR } else { Join-Path $dshRoot 'resources\app.asar' }
+$exe  = Join-Path $dshRoot 'DeepSeek Harness.exe'
+$node = if ($env:DSH_NODE) { $env:DSH_NODE } elseif (Get-Command node.exe -ErrorAction SilentlyContinue) { (Get-Command node.exe).Source } else { 'C:\Program Files\nodejs\node.exe' }
+if (-not (Test-Path $asar)) { "asar not found: $asar" | Out-File -FilePath $log -Append -Encoding utf8; exit 1 }
 
 function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $m" | Out-File -FilePath $log -Append -Encoding utf8 }
 
 Log '=== auto-patch v2 start ==='
-Start-Sleep -Seconds 8   # 给会话端最后一条用户消息留出送达窗口
+Start-Sleep -Seconds 20   # 给会话端最后一条用户消息留出送达窗口（v3.2：8s 不够长回复生成）
 
 # 1) 先礼后兵：taskkill 按映像名优雅关闭（不依赖 Get-Process 枚举）
 $g = & taskkill /IM 'DeepSeek Harness.exe' 2>&1

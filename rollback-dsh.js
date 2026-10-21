@@ -10,13 +10,32 @@
  */
 'use strict';
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const ASAR = 'C:/Users/38761/AppData/Local/Programs/DeepSeek Harness/resources/app.asar';
+function argVal(flag) { const i = process.argv.indexOf(flag); return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null; }
+function resolveAsar() {
+  const cli = argVal('--asar') || process.env.DSH_ASAR;
+  if (cli) return cli;
+  const home = os.homedir();
+  if (process.platform === 'win32')
+    return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Programs', 'DeepSeek Harness', 'resources', 'app.asar');
+  if (process.platform === 'darwin')
+    return '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar';
+  return path.join(home, '.local', 'share', 'DeepSeek Harness', 'resources', 'app.asar');
+}
+function resolveDshOps() {
+  const prof = argVal('--profile') || process.env.DSH_PROFILE_DIR
+    || path.join(os.homedir(), '.dsh', 'profiles', process.platform === 'win32' ? 'desktop' : 'default');
+  return path.join(prof, 'node_modules', 'dsh-ops', 'lib', 'session-pwsh.js');
+}
+
+const ASAR = resolveAsar();
 const ASAR_BAK = ASAR + '.pre-patch.bak';
 const STAMP = ASAR_BAK + '.json';
-const DSHOPS = 'C:/Users/38761/.dsh/profiles/desktop/node_modules/dsh-ops/lib/session-pwsh.js';
+const DSHOPS = resolveDshOps();
 const DSHOPS_BAK = DSHOPS + '.pre-patch.bak';
 const FORCE = process.argv.includes('--force');
 
@@ -30,12 +49,17 @@ function sha256(file) {
   return h.digest('hex');
 }
 
-let out = '';
-try { out = execSync('tasklist /FI "IMAGENAME eq DeepSeek Harness.exe" /NH', { encoding: 'utf8' }); }
-catch (e) { die('无法检查进程表: ' + e.message); }
-if (/DeepSeek Harness\.exe/i.test(out)) die('DSH 仍在运行，请完全退出后重试。');
-try { execSync('powershell -NoProfile -Command "[IO.File]::Open(\'' + ASAR + "',Open','Read','None').Close()\"", { stdio: 'pipe' }); }
-catch (e) { die('app.asar 仍被某进程持有（FileShare.None 探针失败），退出该进程后重试。'); }
+if (process.platform === 'win32') {
+  let out = '';
+  try { out = execSync('tasklist /FI "IMAGENAME eq DeepSeek Harness.exe" /NH', { encoding: 'utf8' }); }
+  catch (e) { die('无法检查进程表: ' + e.message); }
+  if (/DeepSeek Harness\.exe/i.test(out)) die('DSH 仍在运行，请完全退出后重试。');
+  try { execSync('powershell -NoProfile -Command "[IO.File]::Open(\'' + ASAR + "',Open','Read','None').Close()\"", { stdio: 'pipe' }); }
+  catch (e) { die('app.asar 仍被某进程持有（FileShare.None 探针失败），退出该进程后重试。'); }
+} else {
+  try { if (execSync("pgrep -f 'DeepSeek Harness' || true", { encoding: 'utf8' }).trim()) die('DSH 仍在运行，请完全退出后重试。'); }
+  catch (e) { die('无法检查进程表: ' + e.message); }
+}
 
 if (fs.existsSync(ASAR_BAK)) {
   if (!fs.existsSync(STAMP) && !FORCE)
