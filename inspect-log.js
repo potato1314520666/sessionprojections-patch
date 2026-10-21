@@ -12,7 +12,12 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-const SESS_ROOT = 'C:/Users/38761/.dsh/sessions/--C-Users-38761-Documents-deepseek-harness-default-workspace--';
+// session logs: ~/.dsh/sessions/<cwd-slug>/<session-id>/session.v4.jsonl.zstd
+// default root = the slug for the current working directory; override with DSH_SESSIONS_ROOT
+const os = require('os');
+const slugOf = (p) => '--' + p.replace(/[:\\/]+/g, '-').replace(/-+$/, '') + '--';
+const SESS_ROOT = process.env.DSH_SESSIONS_ROOT ||
+  path.join(os.homedir(), '.dsh', 'sessions', slugOf(process.cwd()));
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 const argv = process.argv.slice(2);
 let since = '2026-10-21 22:25';
