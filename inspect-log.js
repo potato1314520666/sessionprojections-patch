@@ -52,9 +52,13 @@ for (const t of targets()) {
     const tm = ev && typeof ev.time === 'number' ? ev.time : null;
     if (tm !== null && tm < sinceMs) continue;
     win++;
-    if (line.includes('sessionProjections')) { zombie++; if (samples.length < 6) samples.push('ZOMBIE  ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + line.slice(0, 180)); }
-    else if (ev && ev.type === 'permission/preset') { perm++; if (samples.length < 12) samples.push('PRESET  ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + JSON.stringify(ev.data).slice(0, 100)); }
-    if (/"is_error"\s*:\s*true|cannot get required service/i.test(line)) { toolErr++; if (samples.length < 15) samples.push('TOOLERR ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + line.slice(0, 180)); }
+    // 只认真实故障：tool/result 事件且 is_error=true 且错误正文含死服务字符串。
+    // （本会话日志里大量出现的该字符串是讨论/取证文本，不是故障——v1 曾因此误报 42 次）
+    if (ev && ev.type === 'tool/result' && /"is_error"\s*:\s*true/.test(line) && line.includes('cannot get required service')) {
+      zombie++; if (samples.length < 6) samples.push('ZOMBIE  ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + line.slice(0, 180));
+    }
+    if (ev && ev.type === 'permission/preset') { perm++; if (samples.length < 12) samples.push('PRESET  ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + JSON.stringify(ev.data).slice(0, 100)); }
+    if (ev && ev.type === 'tool/result' && /"is_error"\s*:\s*true/.test(line)) { toolErr++; if (samples.length < 15) samples.push('TOOLERR ' + (tm ? new Date(tm).toLocaleTimeString('zh-CN') : '?') + ' ' + line.slice(0, 140)); }
   }
   const name = t.split(/[\\/]/).slice(-2).join('/');
   console.log(`\n=== ${name}`);
